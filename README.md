@@ -1,5 +1,5 @@
 # Hospital Appointment & Billing Management System
-**Real-World Problem-Solving Assessment | Python Core Logic**
+Real-World Problem-Solving Assessment | Python Core Logic
 
 ---
 
@@ -10,19 +10,22 @@ This project implements the core business logic for a clinic appointment and bil
 
 ## 2. Architecture & Design Decisions
 
-### 2.1 Pure Functional / Procedural Architecture (Zero OOP)
-Per assignment restrictions, no classes (`class`) or external packages were used. The architecture is structured into pure, deterministic functions that communicate via native Python data structures (`dict`, `list`, `tuple`, `set`).
+### 2.1 Pure Functional Architecture (Zero OOP & Zero Global State)
+Per assignment restrictions, no classes or external packages are used. The architecture is structured into pure, deterministic functions that communicate via native Python data structures:
+- **No Global Mutation:** Functions do not depend on or mutate global module state. State tracking (`processed_ids`) is injected as a parameter, ensuring complete test isolation.
+- **Historical Billing Snapshot:** When an appointment is processed, the consultation fee, test charges, insurance coverage, and senior discounts are preserved directly inside the bill dictionary. The dashboard aggregates revenue strictly from historical bill snapshots rather than recalculating from live doctor fees.
 
 ### 2.2 LEGB Scope Design
-Python's LEGB (Local, Enclosing, Global, Built-in) resolution order was leveraged cleanly:
+Python's LEGB (Local, Enclosing, Global, Built-in) resolution order is respected:
 - **Global Scope (`CLINIC_CONFIG`):** A centralized configuration dictionary defines business constants (tax rate, senior discount percentage, age threshold, insurance coverage percentages, currency).
-- **No Global Mutations:** Functions read from `CLINIC_CONFIG` without modifying global state or using the `global` keyword, maintaining immutability and testability.
+- **Immutability:** Functions read configuration parameters without modifying global state or using the `global` keyword.
 
-### 2.3 Advanced Python Fundamentals
-- **`*args` Aggregator (`calculate_total`):** Accepts arbitrary numbers of numerical charges, filters invalid/negative values, and returns a safe total sum.
-- **`**kwargs` Configurable Billing Engine (`calculate_bill`):** Accepts dynamic keyword arguments (`insurance=True`, `senior_discount=True`) to configure calculations dynamically without rigid function signatures.
-- **`lambda` Expressions:** Used in `generate_doctor_report` and `generate_patient_report` to sort nested dictionary records by total appointments, revenue, and spending.
-- **Comprehensions:** List comprehensions filter completed/cancelled appointments, insured patients, and senior citizens cleanly and declaratively.
+### 2.3 Python Fundamentals
+- **`*args` Aggregator (`calculate_total`):** Accepts arbitrary numbers of charges, strictly verifies numeric types, rejects negative numbers and booleans, and returns a validated sum.
+- **`**kwargs` Configurable Billing Engine (`calculate_bill`):** Accepts validated keyword arguments (`insurance=True`, `senior_discount=True`), rejecting unknown keys and type anomalies.
+- **`lambda` Expressions:** Used in doctor and patient reports to sort records by appointment frequency, revenue, and spending.
+- **Comprehensions:** List and dictionary comprehensions filter completed visits, cancellations, insured patients, and senior citizens cleanly.
+- **Tie Handling:** Reporting functions detect ties (e.g., multiple patients with the same maximum appointments) and return all qualifying names.
 
 ---
 
@@ -31,51 +34,51 @@ Python's LEGB (Local, Enclosing, Global, Built-in) resolution order was leverage
 1. **Subtotal:** Consultation fee + Medical test charges.
 2. **Insurance Coverage:**
    - 20% of doctor consultation fee.
-   - 50% of test charges.
+   - 50% of medical test charges.
    - Total Covered = `(Doctor Fee * 0.20) + (Test Charges * 0.50)`
 3. **Senior Citizen Discount (Age >= 60):**
-   - Applies an additional **10% discount** strictly **after** insurance coverage is deducted:
-   $$\text{Senior Discount} = (\text{Subtotal} - \text{Insurance Covered}) \times 0.10$$
-4. **State-Machine Transition & Cancellation:**
+   - Applies an additional 10% discount strictly after insurance coverage is deducted:
+   - `Senior Discount = (Subtotal - Insurance Covered) * 0.10`
+4. **Ledger Balance Sheet Invariant:**
+   - `Patient Revenue = Consultation Revenue + Test Revenue - Insurance Coverage - Senior Discount`
+5. **State-Machine Transition & Cancellation:**
    - Completed appointments cannot be cancelled.
    - Cancelled appointments cannot be re-processed.
-   - Duplicate appointment IDs are intercepted and rejected.
+   - Processing an appointment twice is strictly blocked.
 
 ---
 
-## 4. Edge Cases Handled
+## 4. Input Validation & Edge Case Protections
 
-| # | Edge Case | Handling Mechanism |
-|---|---|---|
-| 1 | Nonexistent Patient ID | Caught by `validate_appointment`; returns descriptive rejection. |
-| 2 | Nonexistent Doctor ID | Validated against `doctors` dataset before scheduling. |
-| 3 | Doctor Unavailable | Checks `doctor["available"]`; rejects if `False`. |
-| 4 | Invalid Test Requested | Cross-referenced with `test_prices`; flagged and rejected. |
-| 5 | Duplicate Tests | Automatically deduplicated via `set(test_list)` to avoid double-billing. |
-| 6 | Empty Test List | Safely returns `0, []` charges without unpacking errors. |
-| 7 | Negative / Zero Age | Rejected during validation before any billing calculation. |
-| 8 | Invalid Appointment Status | Enforces membership in `{"completed", "pending", "cancelled"}`. |
-| 9 | Cancel Completed Visit | Rejected: completed visits are immutable. |
-| 10 | Process Cancelled Visit | Rejected: cancelled appointments cannot be re-processed. |
-| 11 | Duplicate Processing | Tracked via `processed_appointments` set; prevents duplicate billing. |
-| 12 | Zero Appointments Safety | Guarded with conditional denominators (`len(completed) if completed else 0.0`) to avoid `ZeroDivisionError`. |
-| 13 | Empty Datasets | Safe fallbacks returning `"None"` or empty aggregates. |
+| Edge Case / Probe | Handling Mechanism |
+|---|---|
+| Non-numeric or boolean fee (`"5000"`, `True`) | Rejected in `validate_appointment` and `calculate_total` with `TypeError` |
+| Negative fee or charges (`-5000`) | Rejected with `ValueError` |
+| Non-boolean age (`True`, `"30"`) | Checked with `isinstance(age, int) and not isinstance(age, bool) and age > 0` |
+| String boolean flags (`insurance="no"`) | Rejected with `TypeError` in `calculate_bill` and `validate_appointment` |
+| Non-list test payload (`tests="ECG"`) | Rejected with clear formatting error |
+| Duplicate test requests | Case-insensitively identified and rejected |
+| Case-insensitive test lookup | Normalized lookup matches `"ecg"` to `"ECG"` at correct price |
+| Typo in `**kwargs` (`insurence=True`) | Checked against allowed keys set; raises `ValueError` |
+| Doctor fee raised after billing | Historical bills preserve snapshot fees; dashboard revenue is immutable |
+| Zero appointments safety | Guarded with conditional length checks to prevent `ZeroDivisionError` |
 
 ---
 
 ## 5. Live Execution & Sample Output
 
+### Main Application Run (`python main.py`)
 ```text
 ========================================
       PROCESSING APPOINTMENTS
 ========================================
 [SUCCESS] App ID: A001 | Patient: Ali Khan | Doctor: Dr. Hassan
-          Subtotal: $7500 | Insurance Covered: $2250.0 | Paid: $5250.0
+          Subtotal: $7,500.00 | Insurance: $2,250.00 | Senior Disc: $0.00 | Paid: $5,250.00
 [SUCCESS] App ID: A002 | Patient: Ahmed Raza | Doctor: Dr. Ahmed
-          Subtotal: $2000 | Insurance Covered: $0.0 | Paid: $2000.0
+          Subtotal: $2,000.00 | Insurance: $0.00 | Senior Disc: $0.00 | Paid: $2,000.00
 [REJECTED] App ID: A003 | Appointment A003 is cancelled and cannot be processed
 [SUCCESS] App ID: A004 | Patient: Usman Ali | Doctor: Dr. Hassan
-          Subtotal: $6500 | Insurance Covered: $0.0 | Paid: $5850.0
+          Subtotal: $6,500.00 | Insurance: $0.00 | Senior Disc: $650.00 | Paid: $5,850.00
 
 
 ========================================
@@ -87,37 +90,35 @@ Total Appointments: 4
 Completed: 3
 Cancelled: 1
 Pending: 0
-Total Consultation Revenue: $12000.00
-Total Test Revenue: $4000.00
-Total Insurance Coverage: $2250.00
-Total Patient Revenue: $13100.00
+Total Consultation Revenue: $12,000.00
+Total Test Revenue: $4,000.00
+Total Insurance Coverage: $2,250.00
+Total Senior Discount: $650.00
+Total Patient Revenue: $13,100.00
 Most Requested Specialization: Cardiology
 Highest Spending Patient: Usman Ali
 ========================================
+```
 
-========================================
-      RUNNING EDGE CASE TEST SUITE
-========================================
-Test 01 - Invalid Patient: PASS | Patient P999 does not exist
-Test 02 - Invalid Doctor: PASS | Doctor D999 does not exists
-Test 03 - Doctor Unavailable: PASS | Doctor Dr. Busy is currently unavailable
-Test 04 - Invalid Test: PASS | Invalid tests requested: NonExistentTest
-Test 05 - Duplicate Test Deduplication: PASS | Cost: 1500
-Test 06 - Empty Test List: PASS | Cost: 0
-Test 07 - Negative Age: PASS | patient P998 has invalid age
-Test 08 - Invalid Status: PASS | Invalid appointment status: unknown_status
-Test 09 - Cancel Completed: PASS | Appointment A001 is completed and cannot be cancelled
-Test 10 - Process Cancelled: PASS | Appointment A003 is cancelled and cannot be processed
-Test 11 - Re-process Duplicate: PASS | Appointment A001 has already been processed
-Test 12 - Zero Appointments Safety: PASS | Avg Bill: 0.0
-Test 13 - Empty Datasets: PASS
-========================================
+### Automated Unit Test Suite (`python test_hospital_system.py`)
+```text
+............
+----------------------------------------------------------------------
+Ran 12 tests in 0.018s
+
+OK
 ```
 
 ---
 
 ## 6. How to Run
-Ensure Python 3.10+ is installed. Run directly from the terminal:
+
+### Run the Clinic Application:
 ```bash
 python main.py
+```
+
+### Run the Automated Test Suite:
+```bash
+python test_hospital_system.py
 ```
