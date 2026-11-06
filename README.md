@@ -100,11 +100,11 @@ Highest Spending Patient: Usman Ali
 ========================================
 ```
 
-### Automated Unit Test Suite (`python test_hospital_system.py`)
+### Automated Unit Test Suite (`python -m unittest`)
 ```text
 ............
 ----------------------------------------------------------------------
-Ran 12 tests in 0.018s
+Ran 12 tests in 0.005s
 
 OK
 ```
@@ -118,7 +118,9 @@ OK
 python main.py
 ```
 
-### Run the Automated Test Suite:
+### Run the Automated Test Suite (unittest):
 ```bash
+python -m unittest
+# or
 python test_hospital_system.py
 ```

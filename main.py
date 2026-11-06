@@ -1,3 +1,5 @@
+import math
+
 CLINIC_CONFIG = {
     "currency": "$",
     "senior_age_threshold": 60,
@@ -64,6 +66,8 @@ def calculate_total(*charges):
     for charge in charges:
         if isinstance(charge, bool) or not isinstance(charge, (int, float)):
             raise TypeError(f"Invalid charge type: {type(charge).__name__}. Charges must be numeric.")
+        if math.isnan(charge) or math.isinf(charge):
+            raise ValueError("Invalid charge amount: charges cannot be NaN or infinite.")
         if charge < 0:
             raise ValueError(f"Invalid charge amount: {charge}. Charges cannot be negative.")
         total += float(charge)
@@ -164,6 +168,13 @@ def validate_appointment(
     status = appointment.get("status")
     tests = appointment.get("tests", [])
 
+    if isinstance(p_id, str):
+        p_id = p_id.strip().upper()
+    if isinstance(d_id, str):
+        d_id = d_id.strip().upper()
+    if isinstance(status, str):
+        status = status.strip().lower()
+
     if not isinstance(p_id, str) or p_id not in patients_data:
         return False, f"Patient {p_id} does not exist"
 
@@ -187,7 +198,13 @@ def validate_appointment(
         return False, f"Doctor {d_id} record is corrupt"
 
     fee = doctor.get("fee")
-    if isinstance(fee, bool) or not isinstance(fee, (int, float)) or fee < 0:
+    if (
+        isinstance(fee, bool)
+        or not isinstance(fee, (int, float))
+        or math.isnan(fee)
+        or math.isinf(fee)
+        or fee < 0
+    ):
         return False, f"Doctor {d_id} has invalid consultation fee: {fee}"
 
     available = doctor.get("available")
@@ -270,6 +287,10 @@ def process_appointment(
 
     p_id = app["patient_id"]
     d_id = app["doctor_id"]
+    if isinstance(p_id, str):
+        p_id = p_id.strip().upper()
+    if isinstance(d_id, str):
+        d_id = d_id.strip().upper()
     doctor_fee = doctors_data[d_id]["fee"]
     test_charges, _ = calculate_test_charges(app.get("tests", []), prices_data)
 
@@ -457,27 +478,30 @@ def generate_clinic_dashboard(
         "highest_spending_patient": pat_report["highest_spending_patient"],
     }
 
-    currency = CLINIC_CONFIG["currency"]
+    return dashboard_data
+
+
+def display_clinic_dashboard(dashboard_data, currency=None):
+    if currency is None:
+        currency = CLINIC_CONFIG["currency"]
 
     print("=" * 40)
     print("           CLINIC DASHBOARD")
     print("=" * 40)
-    print(f"Total Patients: {total_patients}")
-    print(f"Total Doctors: {total_doctors}")
-    print(f"Total Appointments: {total_appointments}")
-    print(f"Completed: {len(completed_apps)}")
-    print(f"Cancelled: {len(cancelled_apps)}")
-    print(f"Pending: {len(pending_apps)}")
-    print(f"Total Consultation Revenue: {currency}{consultation_rev:,.2f}")
-    print(f"Total Test Revenue: {currency}{test_rev:,.2f}")
-    print(f"Total Insurance Coverage: {currency}{insurance_cov:,.2f}")
-    print(f"Total Senior Discount: {currency}{senior_disc_total:,.2f}")
-    print(f"Total Patient Revenue: {currency}{patient_rev:,.2f}")
-    print(f"Most Requested Specialization: {doc_report['most_requested_specialization']}")
-    print(f"Highest Spending Patient: {pat_report['highest_spending_patient']}")
+    print(f"Total Patients: {dashboard_data['total_patients']}")
+    print(f"Total Doctors: {dashboard_data['total_doctors']}")
+    print(f"Total Appointments: {dashboard_data['total_appointments']}")
+    print(f"Completed: {dashboard_data['completed_count']}")
+    print(f"Cancelled: {dashboard_data['cancelled_count']}")
+    print(f"Pending: {dashboard_data['pending_count']}")
+    print(f"Total Consultation Revenue: {currency}{dashboard_data['total_consultation_revenue']:,.2f}")
+    print(f"Total Test Revenue: {currency}{dashboard_data['total_test_revenue']:,.2f}")
+    print(f"Total Insurance Coverage: {currency}{dashboard_data['total_insurance_coverage']:,.2f}")
+    print(f"Total Senior Discount: {currency}{dashboard_data['total_senior_discount']:,.2f}")
+    print(f"Total Patient Revenue: {currency}{dashboard_data['total_patient_revenue']:,.2f}")
+    print(f"Most Requested Specialization: {dashboard_data['most_requested_specialization']}")
+    print(f"Highest Spending Patient: {dashboard_data['highest_spending_patient']}")
     print("=" * 40)
-
-    return dashboard_data
 
 
 if __name__ == "__main__":
@@ -502,4 +526,5 @@ if __name__ == "__main__":
             print(f"[REJECTED] App ID: {app_id} | {result}")
 
     print("\n")
-    generate_clinic_dashboard(patients, doctors, appointments)
+    dashboard = generate_clinic_dashboard(patients, doctors, appointments)
+    display_clinic_dashboard(dashboard)

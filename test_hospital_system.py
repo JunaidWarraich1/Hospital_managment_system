@@ -1,5 +1,6 @@
 import copy
-import sys
+import math
+import unittest
 from main import (
     CLINIC_CONFIG,
     calculate_bill,
@@ -14,7 +15,7 @@ from main import (
 )
 
 
-def get_test_data():
+def get_test_fixtures():
     patients = {
         "P001": {"name": "Ali Khan", "age": 32, "city": "Lahore", "insurance": True},
         "P002": {"name": "Ahmed Raza", "age": 45, "city": "Multan", "insurance": False},
@@ -65,236 +66,197 @@ def get_test_data():
         "X-Ray": 2500,
         "MRI": 8000,
     }
+
     return patients, doctors, appointments, test_prices
 
 
-def test_calculate_total_valid_charges():
-    assert calculate_total(5000, 1500, 1000) == 7500.0
+class TestHospitalSystem(unittest.TestCase):
 
+    def test_calculate_total_valid_charges(self):
+        self.assertEqual(calculate_total(100, 200, 300), 600.0)
+        self.assertEqual(calculate_total(), 0.0)
+        self.assertEqual(calculate_total(50.5, 49.5), 100.0)
 
-def test_calculate_total_rejects_negative_and_non_numeric():
-    try:
-        calculate_total(5000, -100)
-        assert False
-    except ValueError:
-        pass
+    def test_calculate_total_type_fuzzing(self):
+        for bad in ("100", None, True, False, [100], {"fee": 100}):
+            with self.subTest(bad=bad):
+                with self.assertRaises(TypeError):
+                    calculate_total(bad)
 
-    try:
-        calculate_total(5000, "1500")
-        assert False
-    except TypeError:
-        pass
+        for bad_num in (-10, -0.01, float("nan"), float("inf")):
+            with self.subTest(bad_num=bad_num):
+                with self.assertRaises(ValueError):
+                    calculate_total(bad_num)
 
-    try:
-        calculate_total(5000, True)
-        assert False
-    except TypeError:
-        pass
+    def test_calculate_bill_standard_and_senior(self):
+        bill_standard = calculate_bill(5000, 2500, insurance=True, senior_discount=False)
+        self.assertEqual(bill_standard["subtotal"], 7500.0)
+        self.assertEqual(bill_standard["insurance_covered"], 2250.0)
+        self.assertEqual(bill_standard["after_insurance"], 5250.0)
+        self.assertEqual(bill_standard["senior_discount"], 0.0)
+        self.assertEqual(bill_standard["total"], 5250.0)
 
+        bill_senior = calculate_bill(5000, 1500, insurance=False, senior_discount=True)
+        self.assertEqual(bill_senior["subtotal"], 6500.0)
+        self.assertEqual(bill_senior["insurance_covered"], 0.0)
+        self.assertEqual(bill_senior["after_insurance"], 5850.0)
+        self.assertEqual(bill_senior["senior_discount"], 650.0)
+        self.assertEqual(bill_senior["total"], 5850.0)
 
-def test_calculate_bill_standard_and_senior():
-    bill_normal = calculate_bill(5000, 2500, insurance=True, senior_discount=False)
-    assert bill_normal["subtotal"] == 7500.0
-    assert bill_normal["insurance_covered"] == 2250.0
-    assert bill_normal["total"] == 5250.0
+    def test_calculate_bill_rejects_invalid_kwargs(self):
+        with self.assertRaises(ValueError):
+            calculate_bill(5000, 1000, bogus_discount=0.5)
 
-    bill_senior = calculate_bill(5000, 2500, insurance=True, senior_discount=True)
-    assert bill_senior["insurance_covered"] == 2250.0
-    assert bill_senior["senior_discount"] == 525.0
-    assert bill_senior["total"] == 4725.0
+        with self.assertRaises(TypeError):
+            calculate_bill(5000, 1000, insurance="yes")
 
+        with self.assertRaises(TypeError):
+            calculate_bill(5000, 1000, senior_discount="true")
 
-def test_calculate_bill_rejects_invalid_kwargs():
-    try:
-        calculate_bill(5000, insurence=True)
-        assert False
-    except ValueError:
-        pass
+    def test_calculate_test_charges_case_and_whitespace_normalization(self):
+        patients, doctors, appointments, prices = get_test_fixtures()
+        cost, errors = calculate_test_charges([" ecg ", "BLOOD TEST"], prices)
+        self.assertEqual(cost, 2500.0)
+        self.assertEqual(errors, [])
 
-    try:
-        calculate_bill(5000, insurance="no")
-        assert False
-    except TypeError:
-        pass
+    def test_calculate_test_charges_rejects_duplicates(self):
+        patients, doctors, appointments, prices = get_test_fixtures()
+        cost, errors = calculate_test_charges(["ECG", "ecg"], prices)
+        self.assertEqual(cost, 0.0)
+        self.assertTrue(any("Duplicate test" in e for e in errors))
 
-    try:
-        calculate_bill(5000, senior_discount="yes")
-        assert False
-    except TypeError:
-        pass
+    def test_calculate_test_charges_rejects_non_list(self):
+        cost, errors = calculate_test_charges("ECG")
+        self.assertEqual(cost, 0.0)
+        self.assertTrue(len(errors) > 0)
 
+    def test_validate_appointment_type_guards(self):
+        patients, doctors, appointments, prices = get_test_fixtures()
+        valid_appt = copy.deepcopy(appointments[0])
 
-def test_calculate_test_charges_case_insensitive():
-    _, _, _, prices = get_test_data()
-    cost, invalids = calculate_test_charges(["ecg", "blood test"], prices)
-    assert cost == 2500.0
-    assert invalids == []
+        valid, msg = validate_appointment(valid_appt, patients, doctors, prices)
+        self.assertTrue(valid)
 
+        bad_patient = copy.deepcopy(patients)
+        bad_patient["P001"]["age"] = True
+        valid, msg = validate_appointment(valid_appt, bad_patient, doctors, prices)
+        self.assertFalse(valid)
 
-def test_calculate_test_charges_rejects_duplicates():
-    _, _, _, prices = get_test_data()
-    cost, invalids = calculate_test_charges(["ECG", "ECG"], prices)
-    assert cost == 0.0
-    assert any("Duplicate" in x for x in invalids)
+        bad_patient["P001"]["age"] = -5
+        valid, msg = validate_appointment(valid_appt, bad_patient, doctors, prices)
+        self.assertFalse(valid)
 
+        bad_patient["P001"]["insurance"] = "yes"
+        valid, msg = validate_appointment(valid_appt, bad_patient, doctors, prices)
+        self.assertFalse(valid)
 
-def test_calculate_test_charges_rejects_non_list():
-    _, _, _, prices = get_test_data()
-    cost, invalids = calculate_test_charges("ECG", prices)
-    assert cost == 0.0
-    assert len(invalids) > 0
+        bad_doctor = copy.deepcopy(doctors)
+        bad_doctor["D001"]["fee"] = True
+        valid, msg = validate_appointment(valid_appt, patients, bad_doctor, prices)
+        self.assertFalse(valid)
 
+        bad_doctor["D001"]["fee"] = -1000
+        valid, msg = validate_appointment(valid_appt, patients, bad_doctor, prices)
+        self.assertFalse(valid)
 
-def test_validate_appointment_type_guards():
-    patients, doctors, appointments, prices = get_test_data()
+        bad_doctor["D001"]["fee"] = float("nan")
+        valid, msg = validate_appointment(valid_appt, patients, bad_doctor, prices)
+        self.assertFalse(valid)
 
-    valid, _ = validate_appointment(None)
-    assert not valid
+        whitespace_appt = copy.deepcopy(valid_appt)
+        whitespace_appt["patient_id"] = " p001 "
+        whitespace_appt["doctor_id"] = " d001 "
+        valid, msg = validate_appointment(whitespace_appt, patients, doctors, prices)
+        self.assertTrue(valid)
 
-    corrupt_patients = copy.deepcopy(patients)
-    corrupt_patients["P001"]["age"] = True
-    t_app = copy.deepcopy(appointments[0])
-    valid, msg = validate_appointment(t_app, corrupt_patients, doctors, prices)
-    assert not valid
-    assert "invalid age" in msg
+        bad_doctor["D001"]["available"] = "yes"
+        valid, msg = validate_appointment(valid_appt, patients, bad_doctor, prices)
+        self.assertFalse(valid)
 
-    corrupt_patients["P001"]["age"] = "32"
-    valid, _ = validate_appointment(t_app, corrupt_patients, doctors, prices)
-    assert not valid
+        bad_appt = copy.deepcopy(valid_appt)
+        bad_appt["status"] = "unknown_status"
+        valid, msg = validate_appointment(bad_appt, patients, doctors, prices)
+        self.assertFalse(valid)
 
-    corrupt_patients["P001"]["age"] = 32
-    corrupt_patients["P001"]["insurance"] = "no"
-    valid, msg = validate_appointment(t_app, corrupt_patients, doctors, prices)
-    assert not valid
-    assert "invalid insurance flag" in msg
+    def test_cancellation_rules_and_terminal_immutability(self):
+        patients, doctors, appointments, prices = get_test_fixtures()
+        test_apps = copy.deepcopy(appointments)
 
-    corrupt_doctors = copy.deepcopy(doctors)
-    corrupt_doctors["D001"]["fee"] = "5000"
-    valid, msg = validate_appointment(t_app, patients, corrupt_doctors, prices)
-    assert not valid
-    assert "invalid consultation fee" in msg
+        pending_appt = {
+            "appointment_id": "A009",
+            "patient_id": "P001",
+            "doctor_id": "D001",
+            "status": "pending",
+            "tests": [],
+        }
+        test_apps.append(pending_appt)
 
-    corrupt_doctors["D001"]["fee"] = -100
-    valid, _ = validate_appointment(t_app, patients, corrupt_doctors, prices)
-    assert not valid
+        ok, msg = cancel_appointment("A009", test_apps)
+        self.assertTrue(ok)
+        self.assertEqual(pending_appt["status"], "cancelled")
 
-    corrupt_doctors["D001"]["fee"] = 5000
-    corrupt_doctors["D001"]["available"] = "no"
-    valid, msg = validate_appointment(t_app, patients, corrupt_doctors, prices)
-    assert not valid
-    assert "currently unavailable" in msg
+        ok, msg = cancel_appointment("A009", test_apps)
+        self.assertFalse(ok)
 
+        ok, msg = cancel_appointment("A001", test_apps)
+        self.assertFalse(ok)
 
-def test_cancellation_rules():
-    _, _, appointments, _ = get_test_data()
-    test_apps = copy.deepcopy(appointments)
-    test_apps.append({
-        "appointment_id": "A099",
-        "patient_id": "P001",
-        "doctor_id": "D001",
-        "status": "pending",
-        "tests": [],
-    })
+        ok, msg = cancel_appointment("NON_EXISTENT", test_apps)
+        self.assertFalse(ok)
 
-    success, _ = cancel_appointment("A099", test_apps)
-    assert success
+    def test_process_appointment_isolated_and_duplicate_guard(self):
+        patients, doctors, appointments, prices = get_test_fixtures()
+        test_apps = copy.deepcopy(appointments)
+        processed = set()
 
-    success, msg = cancel_appointment("A001", test_apps)
-    assert not success
-    assert "completed and cannot be cancelled" in msg
+        ok, res = process_appointment("A001", test_apps, patients, doctors, prices, processed)
+        self.assertTrue(ok)
+        self.assertIn("A001", processed)
+        self.assertIn("bill", test_apps[0])
 
-    success, msg = cancel_appointment("A003", test_apps)
-    assert not success
-    assert "already cancelled" in msg
+        ok, res = process_appointment("A001", test_apps, patients, doctors, prices, processed)
+        self.assertFalse(ok)
 
+        ok, res = process_appointment("A003", test_apps, patients, doctors, prices, processed)
+        self.assertFalse(ok)
 
-def test_process_appointment_isolated():
-    patients, doctors, appointments, prices = get_test_data()
-    test_apps = copy.deepcopy(appointments)
-    processed = set()
+    def test_dashboard_history_and_ledger_balance(self):
+        patients, doctors, appointments, prices = get_test_fixtures()
+        test_apps = copy.deepcopy(appointments)
+        processed = set()
 
-    success, res = process_appointment("A001", test_apps, patients, doctors, prices, processed)
-    assert success
-    assert res["bill"]["total"] == 5250.0
+        for a in test_apps:
+            process_appointment(a["appointment_id"], test_apps, patients, doctors, prices, processed)
 
-    success_dup, msg_dup = process_appointment("A001", test_apps, patients, doctors, prices, processed)
-    assert not success_dup
-    assert "already been processed" in msg_dup
+        dashboard = generate_clinic_dashboard(patients, doctors, test_apps)
 
+        self.assertEqual(dashboard["completed_count"], 3)
+        self.assertEqual(dashboard["cancelled_count"], 1)
+        self.assertEqual(dashboard["total_patient_revenue"], 13100.0)
+        self.assertEqual(dashboard["total_senior_discount"], 650.0)
+        self.assertEqual(dashboard["total_insurance_coverage"], 2250.0)
 
-def test_dashboard_history_and_ledger_balance():
-    patients, doctors, appointments, prices = get_test_data()
-    test_apps = copy.deepcopy(appointments)
-    doctors_copy = copy.deepcopy(doctors)
-    processed = set()
+        calculated_revenue = (
+            dashboard["total_consultation_revenue"]
+            + dashboard["total_test_revenue"]
+            - dashboard["total_insurance_coverage"]
+            - dashboard["total_senior_discount"]
+        )
+        self.assertEqual(round(calculated_revenue, 2), round(dashboard["total_patient_revenue"], 2))
 
-    for a in test_apps:
-        process_appointment(a["appointment_id"], test_apps, patients, doctors_copy, prices, processed)
+    def test_report_ties_are_not_hidden(self):
+        patients, doctors, appointments, prices = get_test_fixtures()
+        test_apps = copy.deepcopy(appointments)
+        processed = set()
+        for a in test_apps:
+            process_appointment(a["appointment_id"], test_apps, patients, doctors, prices, processed)
 
-    doctors_copy["D001"]["fee"] = 99999
+        doc_rep = generate_doctor_report(doctors, test_apps)
+        pat_rep = generate_patient_report(patients, test_apps)
 
-    dashboard = generate_clinic_dashboard(patients, doctors_copy, test_apps)
-
-    assert dashboard["total_consultation_revenue"] == 12000.0
-    assert dashboard["total_test_revenue"] == 4000.0
-    assert dashboard["total_insurance_coverage"] == 2250.0
-    assert dashboard["total_senior_discount"] == 650.0
-    assert dashboard["total_patient_revenue"] == 13100.0
-
-    calculated_revenue = (
-        dashboard["total_consultation_revenue"]
-        + dashboard["total_test_revenue"]
-        - dashboard["total_insurance_coverage"]
-        - dashboard["total_senior_discount"]
-    )
-    assert round(calculated_revenue, 2) == round(dashboard["total_patient_revenue"], 2)
-
-
-def test_report_ties_are_not_hidden():
-    patients, doctors, appointments, prices = get_test_data()
-    test_apps = copy.deepcopy(appointments)
-    processed = set()
-    for a in test_apps:
-        process_appointment(a["appointment_id"], test_apps, patients, doctors, prices, processed)
-
-    doc_rep = generate_doctor_report(doctors, test_apps)
-    pat_rep = generate_patient_report(patients, test_apps)
-
-    assert "Dr. Hassan" in doc_rep["most_requested_doctor"]
-    assert "Usman Ali" in pat_rep["highest_spending_patient"]
-
-
-def run_all_tests():
-    tests = [
-        test_calculate_total_valid_charges,
-        test_calculate_total_rejects_negative_and_non_numeric,
-        test_calculate_bill_standard_and_senior,
-        test_calculate_bill_rejects_invalid_kwargs,
-        test_calculate_test_charges_case_insensitive,
-        test_calculate_test_charges_rejects_duplicates,
-        test_calculate_test_charges_rejects_non_list,
-        test_validate_appointment_type_guards,
-        test_cancellation_rules,
-        test_process_appointment_isolated,
-        test_dashboard_history_and_ledger_balance,
-        test_report_ties_are_not_hidden,
-    ]
-
-    passed = 0
-    for test in tests:
-        try:
-            test()
-            passed += 1
-        except AssertionError as e:
-            print(f"FAILED: {test.__name__} - {e}")
-            sys.exit(1)
-        except Exception as e:
-            print(f"ERROR: {test.__name__} - {e}")
-            sys.exit(1)
-
-    print(f"All {passed} unit tests passed successfully with zero failures.")
-    sys.exit(0)
+        self.assertIn("Dr. Hassan", doc_rep["most_requested_doctor"])
+        self.assertIn("Usman Ali", pat_rep["highest_spending_patient"])
 
 
 if __name__ == "__main__":
-    run_all_tests()
+    unittest.main(verbosity=2)
