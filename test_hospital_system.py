@@ -7,6 +7,7 @@ from main import (
     calculate_test_charges,
     calculate_total,
     cancel_appointment,
+    find_duplicate_appointment_ids,
     generate_clinic_dashboard,
     generate_doctor_report,
     generate_patient_report,
@@ -146,6 +147,20 @@ class TestHospitalSystem(unittest.TestCase):
         valid, msg = validate_appointment(valid_appt, bad_patient, doctors, prices)
         self.assertFalse(valid)
 
+        bad_patient["P001"]["age"] = 500
+        valid, msg = validate_appointment(valid_appt, bad_patient, doctors, prices)
+        self.assertFalse(valid)
+
+        bad_patient["P001"]["age"] = 131
+        valid, msg = validate_appointment(valid_appt, bad_patient, doctors, prices)
+        self.assertFalse(valid)
+
+        boundary_patient = copy.deepcopy(patients)
+        boundary_patient["P001"]["age"] = 130
+        valid, msg = validate_appointment(copy.deepcopy(valid_appt), boundary_patient, doctors, prices)
+        self.assertTrue(valid)
+
+        bad_patient["P001"]["age"] = 32
         bad_patient["P001"]["insurance"] = "yes"
         valid, msg = validate_appointment(valid_appt, bad_patient, doctors, prices)
         self.assertFalse(valid)
@@ -164,10 +179,16 @@ class TestHospitalSystem(unittest.TestCase):
         self.assertFalse(valid)
 
         whitespace_appt = copy.deepcopy(valid_appt)
+        whitespace_appt["appointment_id"] = " a001 "
         whitespace_appt["patient_id"] = " p001 "
         whitespace_appt["doctor_id"] = " d001 "
+        whitespace_appt["status"] = " COMPLETED "
         valid, msg = validate_appointment(whitespace_appt, patients, doctors, prices)
         self.assertTrue(valid)
+        self.assertEqual(whitespace_appt["appointment_id"], "A001")
+        self.assertEqual(whitespace_appt["patient_id"], "P001")
+        self.assertEqual(whitespace_appt["doctor_id"], "D001")
+        self.assertEqual(whitespace_appt["status"], "completed")
 
         bad_doctor["D001"]["available"] = "yes"
         valid, msg = validate_appointment(valid_appt, patients, bad_doctor, prices)
@@ -178,6 +199,17 @@ class TestHospitalSystem(unittest.TestCase):
         valid, msg = validate_appointment(bad_appt, patients, doctors, prices)
         self.assertFalse(valid)
 
+        blank_id_appt = copy.deepcopy(valid_appt)
+        blank_id_appt["appointment_id"] = "   "
+        valid, msg = validate_appointment(blank_id_appt, patients, doctors, prices)
+        self.assertFalse(valid)
+
+        unhashable_id_appt = copy.deepcopy(valid_appt)
+        unhashable_id_appt["patient_id"] = ["P001"]
+        unhashable_id_appt["doctor_id"] = {"id": "D001"}
+        valid, msg = validate_appointment(unhashable_id_appt, patients, doctors, prices)
+        self.assertFalse(valid)
+
     def test_cancellation_rules_and_terminal_immutability(self):
         patients, doctors, appointments, prices = get_test_fixtures()
         test_apps = copy.deepcopy(appointments)
@@ -186,12 +218,12 @@ class TestHospitalSystem(unittest.TestCase):
             "appointment_id": "A009",
             "patient_id": "P001",
             "doctor_id": "D001",
-            "status": "pending",
+            "status": "Pending",
             "tests": [],
         }
         test_apps.append(pending_appt)
 
-        ok, msg = cancel_appointment("A009", test_apps)
+        ok, msg = cancel_appointment(" a009 ", test_apps)
         self.assertTrue(ok)
         self.assertEqual(pending_appt["status"], "cancelled")
 
@@ -203,6 +235,52 @@ class TestHospitalSystem(unittest.TestCase):
 
         ok, msg = cancel_appointment("NON_EXISTENT", test_apps)
         self.assertFalse(ok)
+
+    def test_mixed_case_cancelled_appointment_not_billed(self):
+        patients, doctors, appointments, prices = get_test_fixtures()
+        for raw_status in ("Cancelled", " cancelled ", "CANCELLED"):
+            with self.subTest(raw_status=raw_status):
+                test_apps = [
+                    {
+                        "appointment_id": "C001",
+                        "patient_id": "P001",
+                        "doctor_id": "D001",
+                        "status": raw_status,
+                        "tests": ["ECG"],
+                    }
+                ]
+                ok, res = process_appointment("C001", test_apps, patients, doctors, prices)
+                self.assertFalse(ok)
+                self.assertIn("cancelled", res.lower())
+                self.assertNotIn("bill", test_apps[0])
+                self.assertEqual(test_apps[0]["status"], "cancelled")
+
+    def test_padded_ids_reconcile_across_reports_and_dashboard(self):
+        patients, doctors, _, prices = get_test_fixtures()
+        test_apps = [
+            {
+                "appointment_id": " a001 ",
+                "patient_id": " p001 ",
+                "doctor_id": " d001 ",
+                "status": " completed ",
+                "tests": ["ECG", "Blood Test"],
+            }
+        ]
+        ok, res = process_appointment("A001", test_apps, patients, doctors, prices)
+        self.assertTrue(ok)
+        self.assertEqual(test_apps[0]["patient_id"], "P001")
+        self.assertEqual(test_apps[0]["doctor_id"], "D001")
+
+        doc_rep = generate_doctor_report(doctors, test_apps)
+        pat_rep = generate_patient_report(patients, test_apps)
+        dash = generate_clinic_dashboard(patients, doctors, test_apps)
+
+        self.assertEqual(doc_rep["doctor_details"]["D001"]["completed"], 1)
+        self.assertEqual(doc_rep["doctor_details"]["D001"]["revenue"], 5250.0)
+        self.assertEqual(pat_rep["patient_details"]["P001"]["completed"], 1)
+        self.assertEqual(pat_rep["patient_details"]["P001"]["patient_paid"], 5250.0)
+        self.assertNotIn("Ali Khan", pat_rep["no_completed_appointments"])
+        self.assertEqual(dash["total_patient_revenue"], 5250.0)
 
     def test_process_appointment_isolated_and_duplicate_guard(self):
         patients, doctors, appointments, prices = get_test_fixtures()
@@ -220,6 +298,65 @@ class TestHospitalSystem(unittest.TestCase):
         ok, res = process_appointment("A003", test_apps, patients, doctors, prices, processed)
         self.assertFalse(ok)
 
+    def test_reprocessing_without_set_blocked_by_saved_bill(self):
+        patients, doctors, appointments, prices = get_test_fixtures()
+        test_apps = copy.deepcopy(appointments)
+
+        ok1, res1 = process_appointment("A001", test_apps, patients, doctors, prices)
+        self.assertTrue(ok1)
+        self.assertEqual(test_apps[0]["bill"]["total"], 5250.0)
+
+        doctors["D001"]["fee"] = 99999
+        ok2, res2 = process_appointment("A001", test_apps, patients, doctors, prices)
+        self.assertFalse(ok2)
+        self.assertIn("already been processed", res2)
+        self.assertEqual(test_apps[0]["bill"]["total"], 5250.0)
+
+    def test_unbilled_rejected_visit_not_counted_as_completed(self):
+        patients, doctors, appointments, prices = get_test_fixtures()
+        test_apps = copy.deepcopy(appointments)
+        doctors["D003"]["available"] = False
+        processed = set()
+
+        for a in test_apps:
+            process_appointment(a["appointment_id"], test_apps, patients, doctors, prices, processed)
+
+        doc_rep = generate_doctor_report(doctors, test_apps)
+        pat_rep = generate_patient_report(patients, test_apps)
+        dash = generate_clinic_dashboard(patients, doctors, test_apps)
+
+        self.assertEqual(dash["completed_count"], 2)
+        self.assertEqual(dash["unbilled_count"], 1)
+        self.assertEqual(dash["total_patient_revenue"], 11100.0)
+        self.assertEqual(doc_rep["doctor_details"]["D003"]["completed"], 0)
+        self.assertEqual(doc_rep["doctor_details"]["D003"]["unbilled"], 1)
+        self.assertEqual(doc_rep["doctor_details"]["D003"]["revenue"], 0.0)
+        self.assertEqual(doc_rep["doctor_details"]["D003"]["average_bill"], 0.0)
+        self.assertEqual(pat_rep["patient_details"]["P002"]["completed"], 0)
+        self.assertIn("Ahmed Raza", pat_rep["no_completed_appointments"])
+
+    def test_duplicate_appointment_id_in_batch_rejected(self):
+        patients, doctors, appointments, prices = get_test_fixtures()
+        test_apps = copy.deepcopy(appointments)
+        test_apps.append(
+            {
+                "appointment_id": " a001 ",
+                "patient_id": "P002",
+                "doctor_id": "D002",
+                "status": "completed",
+                "tests": ["MRI"],
+            }
+        )
+
+        self.assertEqual(find_duplicate_appointment_ids(test_apps), {"A001"})
+        ok_dup, msg_dup = process_appointment("A001", test_apps, patients, doctors, prices)
+        self.assertFalse(ok_dup)
+        self.assertIn("Duplicate appointment ID", msg_dup)
+        self.assertNotIn("already been processed", msg_dup)
+
+        ok_other, _ = process_appointment("A002", test_apps, patients, doctors, prices)
+        self.assertTrue(ok_other)
+
     def test_dashboard_history_and_ledger_balance(self):
         patients, doctors, appointments, prices = get_test_fixtures()
         test_apps = copy.deepcopy(appointments)
@@ -231,18 +368,35 @@ class TestHospitalSystem(unittest.TestCase):
         dashboard = generate_clinic_dashboard(patients, doctors, test_apps)
 
         self.assertEqual(dashboard["completed_count"], 3)
+        self.assertEqual(dashboard["unbilled_count"], 0)
         self.assertEqual(dashboard["cancelled_count"], 1)
         self.assertEqual(dashboard["total_patient_revenue"], 13100.0)
         self.assertEqual(dashboard["total_senior_discount"], 650.0)
         self.assertEqual(dashboard["total_insurance_coverage"], 2250.0)
+        self.assertEqual(dashboard["total_tax"], 0.0)
 
         calculated_revenue = (
             dashboard["total_consultation_revenue"]
             + dashboard["total_test_revenue"]
             - dashboard["total_insurance_coverage"]
             - dashboard["total_senior_discount"]
+            + dashboard["total_tax"]
         )
         self.assertEqual(round(calculated_revenue, 2), round(dashboard["total_patient_revenue"], 2))
+
+    def test_nonzero_tax_rate_reconciles_dashboard(self):
+        patients, doctors, appointments, prices = get_test_fixtures()
+        test_apps = [copy.deepcopy(appointments[1])]
+        original_tax = CLINIC_CONFIG["tax_rate"]
+        try:
+            CLINIC_CONFIG["tax_rate"] = 0.10
+            ok, res = process_appointment("A002", test_apps, patients, doctors, prices)
+            self.assertTrue(ok)
+            dash = generate_clinic_dashboard(patients, doctors, test_apps)
+            self.assertEqual(dash["total_tax"], 200.0)
+            self.assertEqual(dash["total_patient_revenue"], 2200.0)
+        finally:
+            CLINIC_CONFIG["tax_rate"] = original_tax
 
     def test_report_ties_are_not_hidden(self):
         patients, doctors, appointments, prices = get_test_fixtures()
@@ -254,8 +408,30 @@ class TestHospitalSystem(unittest.TestCase):
         doc_rep = generate_doctor_report(doctors, test_apps)
         pat_rep = generate_patient_report(patients, test_apps)
 
-        self.assertIn("Dr. Hassan", doc_rep["most_requested_doctor"])
-        self.assertIn("Usman Ali", pat_rep["highest_spending_patient"])
+        for name in ("Ali Khan", "Ahmed Raza", "Sara Ahmed", "Usman Ali"):
+            self.assertIn(name, pat_rep["patient_with_most_appointments"])
+
+        tied_doctors = {
+            "D001": {"name": "Dr. Hassan", "specialization": "Cardiology", "fee": 3000, "available": True},
+            "D002": {"name": "Dr. Sara", "specialization": "Dermatology", "fee": 3000, "available": True},
+        }
+        tied_patients = {
+            "P001": {"name": "Ali Khan", "age": 32, "city": "Lahore", "insurance": False},
+            "P002": {"name": "Ahmed Raza", "age": 45, "city": "Multan", "insurance": False},
+        }
+        tied_apps = [
+            {"appointment_id": "T1", "patient_id": "P001", "doctor_id": "D001", "status": "completed", "tests": []},
+            {"appointment_id": "T2", "patient_id": "P002", "doctor_id": "D002", "status": "completed", "tests": []},
+        ]
+        for a in tied_apps:
+            process_appointment(a["appointment_id"], tied_apps, tied_patients, tied_doctors, prices)
+
+        tied_doc_rep = generate_doctor_report(tied_doctors, tied_apps)
+        tied_pat_rep = generate_patient_report(tied_patients, tied_apps)
+        self.assertIn("Dr. Hassan", tied_doc_rep["most_requested_doctor"])
+        self.assertIn("Dr. Sara", tied_doc_rep["most_requested_doctor"])
+        self.assertIn("Ali Khan", tied_pat_rep["highest_spending_patient"])
+        self.assertIn("Ahmed Raza", tied_pat_rep["highest_spending_patient"])
 
 
 if __name__ == "__main__":
