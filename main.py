@@ -1,7 +1,7 @@
 import math
 
 CLINIC_CONFIG = {
-    "currency": "$",
+    "currency": "PKR ",
     "senior_age_threshold": 60,
     "senior_discount_rate": 0.10,
     "insurance_consultation_coverage": 0.20,
@@ -61,6 +61,45 @@ test_prices = {
 }
 
 
+def normalize_id(value):
+    return value.strip().upper() if isinstance(value, str) else value
+
+
+def normalize_status(value):
+    return value.strip().lower() if isinstance(value, str) else value
+
+
+def normalize_appointment(appointment):
+    if not isinstance(appointment, dict):
+        return None
+    if isinstance(appointment.get("appointment_id"), str):
+        appointment["appointment_id"] = normalize_id(appointment["appointment_id"])
+    if isinstance(appointment.get("patient_id"), str):
+        appointment["patient_id"] = normalize_id(appointment["patient_id"])
+    if isinstance(appointment.get("doctor_id"), str):
+        appointment["doctor_id"] = normalize_id(appointment["doctor_id"])
+    if isinstance(appointment.get("status"), str):
+        appointment["status"] = normalize_status(appointment["status"])
+    return appointment
+
+
+def find_duplicate_appointment_ids(appointments_list=appointments):
+    if not isinstance(appointments_list, list):
+        return set()
+    seen = set()
+    duplicates = set()
+    for item in appointments_list:
+        if not isinstance(item, dict):
+            continue
+        app_id = normalize_id(item.get("appointment_id"))
+        if isinstance(app_id, str) and app_id:
+            if app_id in seen:
+                duplicates.add(app_id)
+            else:
+                seen.add(app_id)
+    return duplicates
+
+
 def calculate_total(*charges):
     total = 0.0
     for charge in charges:
@@ -78,10 +117,13 @@ def calculate_test_charges(test_list, prices=test_prices):
     if not isinstance(test_list, (list, tuple, set)):
         return 0.0, ["Invalid test list format: must be a list"]
 
+    if not isinstance(prices, dict):
+        return 0.0, ["Invalid test price catalog"]
+
     if not test_list:
         return 0.0, []
 
-    normalized_prices = {k.strip().upper(): (v, k) for k, v in prices.items()}
+    normalized_prices = {k.strip().upper(): (v, k) for k, v in prices.items() if isinstance(k, str)}
     seen_tests = set()
     valid_charges = []
     invalid_tests = []
@@ -154,6 +196,20 @@ def calculate_bill(consultation_fee, test_charges=0.0, **kwargs):
     }
 
 
+def resolve_record(records_data, target_id):
+    if not isinstance(records_data, dict):
+        return None, None
+    clean_target = normalize_id(target_id)
+    if not isinstance(clean_target, str) or not clean_target:
+        return None, None
+    if clean_target in records_data:
+        return clean_target, records_data[clean_target]
+    for key, value in records_data.items():
+        if normalize_id(key) == clean_target:
+            return key, value
+    return None, None
+
+
 def validate_appointment(
     appointment,
     patients_data=patients,
@@ -163,39 +219,47 @@ def validate_appointment(
     if not isinstance(appointment, dict):
         return False, "Appointment must be a valid dictionary"
 
+    if not isinstance(patients_data, dict):
+        return False, "Patients data must be a valid dictionary"
+
+    if not isinstance(doctors_data, dict):
+        return False, "Doctors data must be a valid dictionary"
+
+    normalize_appointment(appointment)
+
+    if "appointment_id" in appointment:
+        app_id = appointment.get("appointment_id")
+        if not isinstance(app_id, str) or not app_id:
+            return False, "Invalid appointment_id"
+
     p_id = appointment.get("patient_id")
     d_id = appointment.get("doctor_id")
     status = appointment.get("status")
     tests = appointment.get("tests", [])
 
-    if isinstance(p_id, str):
-        p_id = p_id.strip().upper()
-    if isinstance(d_id, str):
-        d_id = d_id.strip().upper()
-    if isinstance(status, str):
-        status = status.strip().lower()
-
-    if not isinstance(p_id, str) or p_id not in patients_data:
+    p_key, patient = resolve_record(patients_data, p_id)
+    if not isinstance(p_id, str) or not p_id or patient is None:
         return False, f"Patient {p_id} does not exist"
+    appointment["patient_id"] = p_key
 
-    patient = patients_data[p_id]
     if not isinstance(patient, dict):
-        return False, f"Patient {p_id} record is corrupt"
+        return False, f"Patient {p_key} record is corrupt"
 
     age = patient.get("age")
-    if isinstance(age, bool) or not isinstance(age, int) or age <= 0:
-        return False, f"Patient {p_id} has invalid age: {age}"
+    if isinstance(age, bool) or not isinstance(age, int) or age <= 0 or age > 130:
+        return False, f"Patient {p_key} has invalid age: {age}"
 
     insurance = patient.get("insurance")
     if not isinstance(insurance, bool):
-        return False, f"Patient {p_id} has invalid insurance flag: {insurance}"
+        return False, f"Patient {p_key} has invalid insurance flag: {insurance}"
 
-    if not isinstance(d_id, str) or d_id not in doctors_data:
+    d_key, doctor = resolve_record(doctors_data, d_id)
+    if not isinstance(d_id, str) or not d_id or doctor is None:
         return False, f"Doctor {d_id} does not exist"
+    appointment["doctor_id"] = d_key
 
-    doctor = doctors_data[d_id]
     if not isinstance(doctor, dict):
-        return False, f"Doctor {d_id} record is corrupt"
+        return False, f"Doctor {d_key} record is corrupt"
 
     fee = doctor.get("fee")
     if (
@@ -205,11 +269,11 @@ def validate_appointment(
         or math.isinf(fee)
         or fee < 0
     ):
-        return False, f"Doctor {d_id} has invalid consultation fee: {fee}"
+        return False, f"Doctor {d_key} has invalid consultation fee: {fee}"
 
     available = doctor.get("available")
     if available is not True:
-        return False, f"Doctor {doctor.get('name', d_id)} is currently unavailable"
+        return False, f"Doctor {doctor.get('name', d_key)} is currently unavailable"
 
     valid_statuses = {"completed", "pending", "cancelled"}
     if status not in valid_statuses:
@@ -229,25 +293,31 @@ def cancel_appointment(app_id, appointments_list=appointments):
     if not isinstance(appointments_list, list):
         return False, "Appointments list must be a list"
 
-    app = None
-    for item in appointments_list:
-        if isinstance(item, dict) and item.get("appointment_id") == app_id:
-            app = item
-            break
+    clean_app_id = normalize_id(app_id)
+    if not isinstance(clean_app_id, str) or not clean_app_id:
+        return False, f"Invalid appointment ID: {app_id}"
 
-    if not app:
+    matches = [
+        item
+        for item in appointments_list
+        if isinstance(item, dict) and normalize_id(item.get("appointment_id")) == clean_app_id
+    ]
+    if not matches:
         return False, f"Appointment {app_id} does not exist"
+    if len(matches) > 1:
+        return False, f"Duplicate appointment ID detected: {clean_app_id} appears {len(matches)} times"
 
+    app = normalize_appointment(matches[0])
     status = app.get("status")
     if status == "completed":
-        return False, f"Appointment {app_id} is completed and cannot be cancelled"
+        return False, f"Appointment {clean_app_id} is completed and cannot be cancelled"
 
     if status == "cancelled":
-        return False, f"Appointment {app_id} is already cancelled"
+        return False, f"Appointment {clean_app_id} is already cancelled"
 
     if status == "pending":
         app["status"] = "cancelled"
-        return True, f"Appointment {app_id} has been successfully cancelled"
+        return True, f"Appointment {clean_app_id} has been successfully cancelled"
 
     return False, f"Unknown status: {status}"
 
@@ -266,20 +336,27 @@ def process_appointment(
     if not isinstance(appointment_list, list):
         return False, "Appointments list must be a list"
 
-    app = None
-    for item in appointment_list:
-        if isinstance(item, dict) and item.get("appointment_id") == app_id:
-            app = item
-            break
+    clean_app_id = normalize_id(app_id)
+    if not isinstance(clean_app_id, str) or not clean_app_id:
+        return False, f"Invalid appointment ID: {app_id}"
 
-    if not app:
+    matches = [
+        item
+        for item in appointment_list
+        if isinstance(item, dict) and normalize_id(item.get("appointment_id")) == clean_app_id
+    ]
+    if not matches:
         return False, f"Appointment {app_id} does not exist"
+    if len(matches) > 1:
+        return False, f"Duplicate appointment ID detected: {clean_app_id} appears {len(matches)} times"
 
-    if app_id in processed_ids:
-        return False, f"Appointment {app_id} has already been processed"
+    app = normalize_appointment(matches[0])
+
+    if clean_app_id in processed_ids or app.get("bill") is not None:
+        return False, f"Appointment {clean_app_id} has already been processed"
 
     if app.get("status") == "cancelled":
-        return False, f"Appointment {app_id} is cancelled and cannot be processed"
+        return False, f"Appointment {clean_app_id} is cancelled and cannot be processed"
 
     is_valid, reason = validate_appointment(app, patients_data, doctors_data, prices_data)
     if not is_valid:
@@ -287,15 +364,14 @@ def process_appointment(
 
     p_id = app["patient_id"]
     d_id = app["doctor_id"]
-    if isinstance(p_id, str):
-        p_id = p_id.strip().upper()
-    if isinstance(d_id, str):
-        d_id = d_id.strip().upper()
-    doctor_fee = doctors_data[d_id]["fee"]
+    _, patient = resolve_record(patients_data, p_id)
+    _, doctor = resolve_record(doctors_data, d_id)
+
+    doctor_fee = doctor["fee"]
     test_charges, _ = calculate_test_charges(app.get("tests", []), prices_data)
 
-    has_insurance = patients_data[p_id]["insurance"]
-    is_senior = patients_data[p_id]["age"] >= CLINIC_CONFIG["senior_age_threshold"]
+    has_insurance = patient["insurance"]
+    is_senior = patient["age"] >= CLINIC_CONFIG["senior_age_threshold"]
 
     bill = calculate_bill(
         doctor_fee,
@@ -306,17 +382,24 @@ def process_appointment(
 
     app["status"] = "completed"
     app["bill"] = bill
-    processed_ids.add(app_id)
+    processed_ids.add(clean_app_id)
 
     return True, {
-        "appointment_id": app_id,
-        "patient_name": patients_data[p_id]["name"],
-        "doctor_name": doctors_data[d_id]["name"],
+        "appointment_id": clean_app_id,
+        "patient_name": patient.get("name", p_id),
+        "doctor_name": doctor.get("name", d_id),
         "bill": bill,
     }
 
 
 def generate_doctor_report(doctors_data=doctors, appointments_list=appointments):
+    if not isinstance(doctors_data, dict) or not isinstance(appointments_list, list):
+        return {
+            "doctor_details": {},
+            "most_requested_doctor": "None",
+            "most_requested_specialization": "None",
+        }
+
     doc_stats = {}
     spec_counts = {}
 
@@ -324,11 +407,25 @@ def generate_doctor_report(doctors_data=doctors, appointments_list=appointments)
         if not isinstance(d_info, dict):
             continue
 
-        doc_apps = [a for a in appointments_list if isinstance(a, dict) and a.get("doctor_id") == d_id]
-        completed = [a for a in doc_apps if a.get("status") == "completed"]
-        cancelled = [a for a in doc_apps if a.get("status") == "cancelled"]
+        clean_d_id = normalize_id(d_id)
+        doc_apps = [
+            a
+            for a in appointments_list
+            if isinstance(a, dict) and normalize_id(a.get("doctor_id")) == clean_d_id
+        ]
+        completed = [
+            a
+            for a in doc_apps
+            if normalize_status(a.get("status")) == "completed" and isinstance(a.get("bill"), dict)
+        ]
+        unbilled = [
+            a
+            for a in doc_apps
+            if normalize_status(a.get("status")) == "completed" and not isinstance(a.get("bill"), dict)
+        ]
+        cancelled = [a for a in doc_apps if normalize_status(a.get("status")) == "cancelled"]
 
-        total_rev = calculate_total(*[a.get("bill", {}).get("total", 0.0) for a in completed])
+        total_rev = round(calculate_total(*[a.get("bill", {}).get("total", 0.0) for a in completed]), 2)
         avg_bill = round(total_rev / len(completed), 2) if completed else 0.0
 
         doc_stats[d_id] = {
@@ -336,6 +433,7 @@ def generate_doctor_report(doctors_data=doctors, appointments_list=appointments)
             "specialization": d_info.get("specialization", "General"),
             "total_appointments": len(doc_apps),
             "completed": len(completed),
+            "unbilled": len(unbilled),
             "cancelled": len(cancelled),
             "revenue": total_rev,
             "average_bill": avg_bill,
@@ -366,19 +464,43 @@ def generate_doctor_report(doctors_data=doctors, appointments_list=appointments)
 
 
 def generate_patient_report(patients_data=patients, appointments_list=appointments):
+    if not isinstance(patients_data, dict) or not isinstance(appointments_list, list):
+        return {
+            "patient_details": {},
+            "highest_spending_patient": "None",
+            "patient_with_most_appointments": "None",
+            "no_completed_appointments": [],
+            "insured_patients": [],
+            "senior_patients": [],
+        }
+
     patient_stats = {}
 
     for p_id, p_info in patients_data.items():
         if not isinstance(p_info, dict):
             continue
 
-        p_apps = [a for a in appointments_list if isinstance(a, dict) and a.get("patient_id") == p_id]
-        completed = [a for a in p_apps if a.get("status") == "completed"]
-        cancelled = [a for a in p_apps if a.get("status") == "cancelled"]
+        clean_p_id = normalize_id(p_id)
+        p_apps = [
+            a
+            for a in appointments_list
+            if isinstance(a, dict) and normalize_id(a.get("patient_id")) == clean_p_id
+        ]
+        completed = [
+            a
+            for a in p_apps
+            if normalize_status(a.get("status")) == "completed" and isinstance(a.get("bill"), dict)
+        ]
+        unbilled = [
+            a
+            for a in p_apps
+            if normalize_status(a.get("status")) == "completed" and not isinstance(a.get("bill"), dict)
+        ]
+        cancelled = [a for a in p_apps if normalize_status(a.get("status")) == "cancelled"]
 
-        total_charges = calculate_total(*[a.get("bill", {}).get("subtotal", 0.0) for a in completed])
-        insurance_paid = calculate_total(*[a.get("bill", {}).get("insurance_covered", 0.0) for a in completed])
-        patient_paid = calculate_total(*[a.get("bill", {}).get("total", 0.0) for a in completed])
+        total_charges = round(calculate_total(*[a.get("bill", {}).get("subtotal", 0.0) for a in completed]), 2)
+        insurance_paid = round(calculate_total(*[a.get("bill", {}).get("insurance_covered", 0.0) for a in completed]), 2)
+        patient_paid = round(calculate_total(*[a.get("bill", {}).get("total", 0.0) for a in completed]), 2)
 
         patient_stats[p_id] = {
             "name": p_info.get("name", p_id),
@@ -386,6 +508,7 @@ def generate_patient_report(patients_data=patients, appointments_list=appointmen
             "has_insurance": bool(p_info.get("insurance", False)),
             "total_appointments": len(p_apps),
             "completed": len(completed),
+            "unbilled": len(unbilled),
             "cancelled": len(cancelled),
             "total_charges": total_charges,
             "insurance_paid": insurance_paid,
@@ -408,17 +531,17 @@ def generate_patient_report(patients_data=patients, appointments_list=appointmen
 
     no_completed_patients = [p["name"] for p in patient_stats.values() if p["completed"] == 0]
     insured_patients = [
-        p_info["name"]
-        for p_info in patients_data.values()
+        p_info.get("name", p_id)
+        for p_id, p_info in patients_data.items()
         if isinstance(p_info, dict) and p_info.get("insurance") is True
     ]
     senior_patients = [
-        p_info["name"]
-        for p_info in patients_data.values()
+        p_info.get("name", p_id)
+        for p_id, p_info in patients_data.items()
         if isinstance(p_info, dict)
         and isinstance(p_info.get("age"), int)
         and not isinstance(p_info.get("age"), bool)
-        and p_info.get("age") >= CLINIC_CONFIG["senior_age_threshold"]
+        and CLINIC_CONFIG["senior_age_threshold"] <= p_info.get("age") <= 130
     ]
 
     return {
@@ -439,18 +562,35 @@ def generate_clinic_dashboard(
     doc_report = generate_doctor_report(doctors_data, appointments_list)
     pat_report = generate_patient_report(patients_data, appointments_list)
 
-    total_patients = len(patients_data)
-    total_doctors = len(doctors_data)
-    total_appointments = len(appointments_list)
+    total_patients = len(patients_data) if isinstance(patients_data, dict) else 0
+    total_doctors = len(doctors_data) if isinstance(doctors_data, dict) else 0
+    safe_appointments = appointments_list if isinstance(appointments_list, list) else []
+    total_appointments = len(safe_appointments)
 
-    completed_apps = [a for a in appointments_list if isinstance(a, dict) and a.get("status") == "completed"]
-    cancelled_apps = [a for a in appointments_list if isinstance(a, dict) and a.get("status") == "cancelled"]
-    pending_apps = [a for a in appointments_list if isinstance(a, dict) and a.get("status") == "pending"]
+    completed_apps = [
+        a
+        for a in safe_appointments
+        if isinstance(a, dict) and normalize_status(a.get("status")) == "completed" and isinstance(a.get("bill"), dict)
+    ]
+    unbilled_apps = [
+        a
+        for a in safe_appointments
+        if isinstance(a, dict)
+        and normalize_status(a.get("status")) == "completed"
+        and not isinstance(a.get("bill"), dict)
+    ]
+    cancelled_apps = [
+        a for a in safe_appointments if isinstance(a, dict) and normalize_status(a.get("status")) == "cancelled"
+    ]
+    pending_apps = [
+        a for a in safe_appointments if isinstance(a, dict) and normalize_status(a.get("status")) == "pending"
+    ]
 
     consultation_rev = 0.0
     test_rev = 0.0
     insurance_cov = 0.0
     senior_disc_total = 0.0
+    tax_total = 0.0
     patient_rev = 0.0
 
     for a in completed_apps:
@@ -460,6 +600,7 @@ def generate_clinic_dashboard(
             test_rev += bill.get("test_charges", 0.0)
             insurance_cov += bill.get("insurance_covered", 0.0)
             senior_disc_total += bill.get("senior_discount", 0.0)
+            tax_total += bill.get("tax", 0.0)
             patient_rev += bill.get("total", 0.0)
 
     dashboard_data = {
@@ -467,18 +608,66 @@ def generate_clinic_dashboard(
         "total_doctors": total_doctors,
         "total_appointments": total_appointments,
         "completed_count": len(completed_apps),
+        "unbilled_count": len(unbilled_apps),
         "cancelled_count": len(cancelled_apps),
         "pending_count": len(pending_apps),
-        "total_consultation_revenue": consultation_rev,
-        "total_test_revenue": test_rev,
-        "total_insurance_coverage": insurance_cov,
-        "total_senior_discount": senior_disc_total,
-        "total_patient_revenue": patient_rev,
+        "total_consultation_revenue": round(consultation_rev, 2),
+        "total_test_revenue": round(test_rev, 2),
+        "total_insurance_coverage": round(insurance_cov, 2),
+        "total_senior_discount": round(senior_disc_total, 2),
+        "total_tax": round(tax_total, 2),
+        "total_patient_revenue": round(patient_rev, 2),
         "most_requested_specialization": doc_report["most_requested_specialization"],
         "highest_spending_patient": pat_report["highest_spending_patient"],
     }
 
     return dashboard_data
+
+
+def display_doctor_report(doctor_report, currency=None):
+    if currency is None:
+        currency = CLINIC_CONFIG["currency"]
+
+    print("=" * 40)
+    print("            DOCTOR REPORT")
+    print("=" * 40)
+    for d_id, stats in doctor_report["doctor_details"].items():
+        print(
+            f"{d_id} | {stats['name']} ({stats['specialization']}) | "
+            f"Total: {stats['total_appointments']} | Completed: {stats['completed']} | "
+            f"Unbilled: {stats['unbilled']} | Cancelled: {stats['cancelled']} | "
+            f"Revenue: {currency}{stats['revenue']:,.2f} | Avg Bill: {currency}{stats['average_bill']:,.2f}"
+        )
+    print(f"Most Requested Doctor: {doctor_report['most_requested_doctor']}")
+    print(f"Most Requested Specialization: {doctor_report['most_requested_specialization']}")
+    print("=" * 40)
+
+
+def display_patient_report(patient_report, currency=None):
+    if currency is None:
+        currency = CLINIC_CONFIG["currency"]
+
+    print("=" * 40)
+    print("            PATIENT REPORT")
+    print("=" * 40)
+    for p_id, stats in patient_report["patient_details"].items():
+        ins_label = "Insured" if stats["has_insurance"] else "Self-Pay"
+        print(
+            f"{p_id} | {stats['name']} (Age: {stats['age']}, {ins_label}) | "
+            f"Total: {stats['total_appointments']} | Completed: {stats['completed']} | "
+            f"Unbilled: {stats['unbilled']} | Cancelled: {stats['cancelled']} | "
+            f"Charges: {currency}{stats['total_charges']:,.2f} | Insurance: {currency}{stats['insurance_paid']:,.2f} | "
+            f"Paid: {currency}{stats['patient_paid']:,.2f}"
+        )
+    print(f"Highest Spending Patient: {patient_report['highest_spending_patient']}")
+    print(f"Patient with Most Appointments: {patient_report['patient_with_most_appointments']}")
+    no_comp = ", ".join(patient_report["no_completed_appointments"]) or "None"
+    insured = ", ".join(patient_report["insured_patients"]) or "None"
+    seniors = ", ".join(patient_report["senior_patients"]) or "None"
+    print(f"No Completed Appointments: {no_comp}")
+    print(f"Insured Patients: {insured}")
+    print(f"Senior Patients: {seniors}")
+    print("=" * 40)
 
 
 def display_clinic_dashboard(dashboard_data, currency=None):
@@ -492,12 +681,14 @@ def display_clinic_dashboard(dashboard_data, currency=None):
     print(f"Total Doctors: {dashboard_data['total_doctors']}")
     print(f"Total Appointments: {dashboard_data['total_appointments']}")
     print(f"Completed: {dashboard_data['completed_count']}")
+    print(f"Unbilled: {dashboard_data['unbilled_count']}")
     print(f"Cancelled: {dashboard_data['cancelled_count']}")
     print(f"Pending: {dashboard_data['pending_count']}")
     print(f"Total Consultation Revenue: {currency}{dashboard_data['total_consultation_revenue']:,.2f}")
     print(f"Total Test Revenue: {currency}{dashboard_data['total_test_revenue']:,.2f}")
     print(f"Total Insurance Coverage: {currency}{dashboard_data['total_insurance_coverage']:,.2f}")
     print(f"Total Senior Discount: {currency}{dashboard_data['total_senior_discount']:,.2f}")
+    print(f"Total Tax: {currency}{dashboard_data['total_tax']:,.2f}")
     print(f"Total Patient Revenue: {currency}{dashboard_data['total_patient_revenue']:,.2f}")
     print(f"Most Requested Specialization: {dashboard_data['most_requested_specialization']}")
     print(f"Highest Spending Patient: {dashboard_data['highest_spending_patient']}")
@@ -509,6 +700,10 @@ if __name__ == "__main__":
     print("      PROCESSING APPOINTMENTS")
     print("=" * 40)
 
+    duplicate_ids = find_duplicate_appointment_ids(appointments)
+    if duplicate_ids:
+        print(f"[DATA ERROR] Duplicate appointment ID(s) found on load: {', '.join(sorted(duplicate_ids))}")
+
     processed_ids = set()
     for app in list(appointments):
         app_id = app["appointment_id"]
@@ -517,13 +712,21 @@ if __name__ == "__main__":
             bill = result["bill"]
             curr = CLINIC_CONFIG["currency"]
             print(
-                f"[SUCCESS] App ID: {app_id} | Patient: {result['patient_name']} | Doctor: {result['doctor_name']}"
+                f"[SUCCESS] App ID: {result['appointment_id']} | Patient: {result['patient_name']} | Doctor: {result['doctor_name']}"
             )
             print(
                 f"          Subtotal: {curr}{bill['subtotal']:,.2f} | Insurance: {curr}{bill['insurance_covered']:,.2f} | Senior Disc: {curr}{bill['senior_discount']:,.2f} | Paid: {curr}{bill['total']:,.2f}"
             )
         else:
             print(f"[REJECTED] App ID: {app_id} | {result}")
+
+    print("\n")
+    doctor_report = generate_doctor_report(doctors, appointments)
+    display_doctor_report(doctor_report)
+
+    print("\n")
+    patient_report = generate_patient_report(patients, appointments)
+    display_patient_report(patient_report)
 
     print("\n")
     dashboard = generate_clinic_dashboard(patients, doctors, appointments)
