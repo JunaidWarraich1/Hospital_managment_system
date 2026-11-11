@@ -100,6 +100,16 @@ def find_duplicate_appointment_ids(appointments_list=appointments):
     return duplicates
 
 
+def is_valid_non_negative_number(value):
+    return (
+        not isinstance(value, bool)
+        and isinstance(value, (int, float))
+        and not math.isnan(value)
+        and not math.isinf(value)
+        and value >= 0
+    )
+
+
 def calculate_total(*charges):
     total = 0.0
     for charge in charges:
@@ -141,6 +151,9 @@ def calculate_test_charges(test_list, prices=test_prices):
 
         if normalized in normalized_prices:
             fee, _ = normalized_prices[normalized]
+            if not is_valid_non_negative_number(fee):
+                invalid_tests.append(f"Invalid price for test {test}: {fee}")
+                continue
             valid_charges.append(fee)
         else:
             invalid_tests.append(test)
@@ -152,11 +165,22 @@ def calculate_test_charges(test_list, prices=test_prices):
     return total_cost, []
 
 
+def calculate_insurance_coverage(consultation_fee, test_charges=0.0, has_insurance=True):
+    calculate_total(consultation_fee, test_charges)
+    if not isinstance(has_insurance, bool):
+        raise TypeError(f"Option 'has_insurance' must be a boolean, got {type(has_insurance).__name__}")
+    if not has_insurance:
+        return 0.0
+    doc_coverage = consultation_fee * CLINIC_CONFIG["insurance_consultation_coverage"]
+    test_coverage = test_charges * CLINIC_CONFIG["insurance_test_coverage"]
+    return round(doc_coverage + test_coverage, 2)
+
+
 def calculate_bill(consultation_fee, test_charges=0.0, **kwargs):
-    allowed_keys = {"insurance", "senior_discount"}
+    allowed_keys = {"insurance", "senior_discount", "include_tests"}
     unknown_keys = set(kwargs.keys()) - allowed_keys
     if unknown_keys:
-        raise ValueError(f"Unknown billing option(s): {', '.join(unknown_keys)}")
+        raise ValueError(f"Unknown billing option(s): {', '.join(sorted(unknown_keys))}")
 
     has_insurance = kwargs.get("insurance", False)
     if not isinstance(has_insurance, bool):
@@ -166,14 +190,15 @@ def calculate_bill(consultation_fee, test_charges=0.0, **kwargs):
     if not isinstance(is_senior, bool):
         raise TypeError(f"Option 'senior_discount' must be a boolean, got {type(is_senior).__name__}")
 
-    subtotal = calculate_total(consultation_fee, test_charges)
+    include_tests = kwargs.get("include_tests", True)
+    if not isinstance(include_tests, bool):
+        raise TypeError(f"Option 'include_tests' must be a boolean, got {type(include_tests).__name__}")
 
-    insurance_covered = 0.0
-    if has_insurance:
-        doc_coverage = consultation_fee * CLINIC_CONFIG["insurance_consultation_coverage"]
-        test_coverage = test_charges * CLINIC_CONFIG["insurance_test_coverage"]
-        insurance_covered = doc_coverage + test_coverage
+    calculate_total(consultation_fee, test_charges)
+    applied_tests = float(test_charges) if include_tests else 0.0
+    subtotal = calculate_total(consultation_fee, applied_tests)
 
+    insurance_covered = calculate_insurance_coverage(consultation_fee, applied_tests, has_insurance)
     after_insurance = subtotal - insurance_covered
 
     senior_discount = 0.0
@@ -186,7 +211,7 @@ def calculate_bill(consultation_fee, test_charges=0.0, **kwargs):
 
     return {
         "consultation_fee": round(float(consultation_fee), 2),
-        "test_charges": round(float(test_charges), 2),
+        "test_charges": round(applied_tests, 2),
         "subtotal": round(subtotal, 2),
         "insurance_covered": round(insurance_covered, 2),
         "after_insurance": round(after_insurance, 2),
@@ -262,13 +287,7 @@ def validate_appointment(
         return False, f"Doctor {d_key} record is corrupt"
 
     fee = doctor.get("fee")
-    if (
-        isinstance(fee, bool)
-        or not isinstance(fee, (int, float))
-        or math.isnan(fee)
-        or math.isinf(fee)
-        or fee < 0
-    ):
+    if not is_valid_non_negative_number(fee):
         return False, f"Doctor {d_key} has invalid consultation fee: {fee}"
 
     available = doctor.get("available")
@@ -505,7 +524,7 @@ def generate_patient_report(patients_data=patients, appointments_list=appointmen
         patient_stats[p_id] = {
             "name": p_info.get("name", p_id),
             "age": p_info.get("age", 0),
-            "has_insurance": bool(p_info.get("insurance", False)),
+            "has_insurance": p_info.get("insurance") is True,
             "total_appointments": len(p_apps),
             "completed": len(completed),
             "unbilled": len(unbilled),
@@ -539,8 +558,7 @@ def generate_patient_report(patients_data=patients, appointments_list=appointmen
         p_info.get("name", p_id)
         for p_id, p_info in patients_data.items()
         if isinstance(p_info, dict)
-        and isinstance(p_info.get("age"), int)
-        and not isinstance(p_info.get("age"), bool)
+        and (isinstance(p_info.get("age"), int) and not isinstance(p_info.get("age"), bool))
         and CLINIC_CONFIG["senior_age_threshold"] <= p_info.get("age") <= 130
     ]
 
@@ -586,22 +604,13 @@ def generate_clinic_dashboard(
         a for a in safe_appointments if isinstance(a, dict) and normalize_status(a.get("status")) == "pending"
     ]
 
-    consultation_rev = 0.0
-    test_rev = 0.0
-    insurance_cov = 0.0
-    senior_disc_total = 0.0
-    tax_total = 0.0
-    patient_rev = 0.0
-
-    for a in completed_apps:
-        bill = a.get("bill")
-        if isinstance(bill, dict):
-            consultation_rev += bill.get("consultation_fee", 0.0)
-            test_rev += bill.get("test_charges", 0.0)
-            insurance_cov += bill.get("insurance_covered", 0.0)
-            senior_disc_total += bill.get("senior_discount", 0.0)
-            tax_total += bill.get("tax", 0.0)
-            patient_rev += bill.get("total", 0.0)
+    bills = [a.get("bill", {}) for a in completed_apps if isinstance(a.get("bill"), dict)]
+    consultation_rev = calculate_total(*[b.get("consultation_fee", 0.0) for b in bills])
+    test_rev = calculate_total(*[b.get("test_charges", 0.0) for b in bills])
+    insurance_cov = calculate_total(*[b.get("insurance_covered", 0.0) for b in bills])
+    senior_disc_total = calculate_total(*[b.get("senior_discount", 0.0) for b in bills])
+    tax_total = calculate_total(*[b.get("tax", 0.0) for b in bills])
+    patient_rev = calculate_total(*[b.get("total", 0.0) for b in bills])
 
     dashboard_data = {
         "total_patients": total_patients,
