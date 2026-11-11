@@ -24,7 +24,7 @@ Python's LEGB (Local, Enclosing, Global, Built-in) resolution order is respected
 
 ### 2.3 Python Fundamentals
 - **`*args` Aggregator (`calculate_total`):** Accepts arbitrary numbers of charges, strictly verifies numeric types, rejects booleans, negatives, `NaN`, and `inf`, and returns a validated sum.
-- **`**kwargs` Configurable Billing Engine (`calculate_bill`):** Accepts validated keyword arguments (`insurance=True`, `senior_discount=True`), rejecting unknown keys and type anomalies.
+- **`**kwargs` Configurable Billing Engine (`calculate_bill`):** Delegates coverage computation to `calculate_insurance_coverage` and accepts validated keyword arguments (`insurance=True`, `senior_discount=True`, `include_tests=True`), rejecting unknown keys and non-boolean options.
 - **`lambda` Expressions:** Used in doctor and patient reports to sort records by appointment frequency, revenue, and spending.
 - **Comprehensions:** List and dictionary comprehensions filter billed completed visits, unbilled visits, cancellations, insured patients, and senior citizens cleanly.
 - **Tie Handling:** Reporting functions detect ties (e.g., all four patients sharing the maximum appointment count) and return all qualifying names.
@@ -134,9 +134,9 @@ Highest Spending Patient: Usman Ali
 
 ### Automated Unit Test Suite (`python -m unittest`)
 ```text
-..................
+.....................
 ----------------------------------------------------------------------
-Ran 18 tests in 0.019s
+Ran 21 tests in 0.016s
 
 OK
 ```

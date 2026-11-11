@@ -4,6 +4,7 @@ import unittest
 from main import (
     CLINIC_CONFIG,
     calculate_bill,
+    calculate_insurance_coverage,
     calculate_test_charges,
     calculate_total,
     cancel_appointment,
@@ -432,6 +433,62 @@ class TestHospitalSystem(unittest.TestCase):
         self.assertIn("Dr. Sara", tied_doc_rep["most_requested_doctor"])
         self.assertIn("Ali Khan", tied_pat_rep["highest_spending_patient"])
         self.assertIn("Ahmed Raza", tied_pat_rep["highest_spending_patient"])
+
+    def test_calculate_bill_include_tests_and_insurance_helper(self):
+        self.assertEqual(calculate_insurance_coverage(5000, 2500, True), 2250.0)
+        self.assertEqual(calculate_insurance_coverage(5000, 2500, False), 0.0)
+
+        bill_default = calculate_bill(5000, insurance=True, senior_discount=True, include_tests=True)
+        self.assertEqual(bill_default["total"], 3600.0)
+
+        bill_excluded = calculate_bill(5000, 2500, insurance=True, senior_discount=False, include_tests=False)
+        self.assertEqual(bill_excluded["test_charges"], 0.0)
+        self.assertEqual(bill_excluded["total"], 4000.0)
+
+        with self.assertRaises(TypeError):
+            calculate_bill(5000, 2500, include_tests="yes")
+
+    def test_corrupt_test_catalog_and_empty_structures(self):
+        patients, doctors, appointments, _ = get_test_fixtures()
+        bad_prices = {"ECG": "free", "MRI": -500}
+        cost, errors = calculate_test_charges(["ECG"], bad_prices)
+        self.assertEqual(cost, 0.0)
+        self.assertTrue(len(errors) > 0)
+
+        valid, reason = validate_appointment(copy.deepcopy(appointments[0]), patients, doctors, bad_prices)
+        self.assertFalse(valid)
+
+        empty_doc = generate_doctor_report({}, [])
+        empty_pat = generate_patient_report({}, [])
+        empty_dash = generate_clinic_dashboard({}, {}, [])
+        self.assertEqual(empty_doc["most_requested_doctor"], "None")
+        self.assertEqual(empty_pat["highest_spending_patient"], "None")
+        self.assertEqual(empty_dash["total_patient_revenue"], 0.0)
+
+    def test_patient_report_and_dashboard_strict_types(self):
+        bad_patients = {"P001": {"name": "Ali", "age": 30, "city": "Lahore", "insurance": "no"}}
+        pat_rep = generate_patient_report(bad_patients, [])
+        self.assertFalse(pat_rep["patient_details"]["P001"]["has_insurance"])
+        self.assertEqual(pat_rep["insured_patients"], [])
+
+        corrupt_bill_appts = [
+            {
+                "appointment_id": "A1",
+                "patient_id": "P001",
+                "doctor_id": "D001",
+                "status": "completed",
+                "bill": {
+                    "consultation_fee": True,
+                    "test_charges": 0.0,
+                    "insurance_covered": 0.0,
+                    "senior_discount": 0.0,
+                    "tax": 0.0,
+                    "total": 100.0,
+                },
+            }
+        ]
+        with self.assertRaises(TypeError):
+            generate_clinic_dashboard(bad_patients, {}, corrupt_bill_appts)
 
 
 if __name__ == "__main__":
